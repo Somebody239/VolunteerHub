@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Professional Dark Theme Design System - Volunteer Marketplace */
+
+@layer base {
+  :root {
+    /* Dark Theme Base Colors */
+    --background: 0 0% 8%;
+    --foreground: 0 0% 95%;
+
+    --card: 0 0% 12%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 0 0% 12%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 0 0% 95%;
+    --primary-foreground: 0 0% 8%;
+
+    --secondary: 0 0% 15%;
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 60%;
+
+    --accent: 0 0% 18%;
+    --accent-foreground: 0 0% 95%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 95%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 0 0% 95%;
+
+    --radius: 1rem;
+
+    /* Glass Effect Variables */
+    --glass-bg: 0 0% 10% / 0.8;
+    --glass-border: 0 0% 25% / 0.3;
+    --glass-shadow: 0 0% 0% / 0.5;
+
+    /* Profile & Gamification */
+    --xp-bar: 142 100% 70%;
+    --level-bg: 0 0% 18%;
+    --badge-gold: 45 100% 60%;
+
+    /* Navigation */
+    --nav-active: 0 0% 95%;
+    --nav-inactive: 0 0% 60%;
+    --nav-bg: 0 0% 10%;
+
+    /* Status Colors */
+    --status-pending: 45 100% 60%;
+    --status-confirmed: 142 100% 70%;
+    --status-completed: 220 100% 60%;
+
+    /* Opportunity Cards */
+    --opportunity-bg: 0 0% 12%;
+    --opportunity-border: 0 0% 20%;
+    --opportunity-hover: 0 0% 15%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-medium antialiased;
+  }
+
+  /* Glass morphism utility classes */
+  .glass {
+    background: hsla(var(--glass-bg));
+    border: 1px solid hsla(var(--glass-border));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .glass-card {
+    @apply glass rounded-2xl shadow-lg;
+    box-shadow: 0 8px 32px hsla(var(--glass-shadow));
+  }
+
+  /* Progress bar animations */
+  .progress-fill {
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Hover effects */
+  .card-hover {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .card-hover:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px hsla(var(--glass-shadow));
+  }
+}
