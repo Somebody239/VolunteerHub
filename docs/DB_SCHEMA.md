@@ -93,7 +93,6 @@ Onboarding per role
   { "table_schema": "public", "table_name": "opportunities", "column_name": "address", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "dates", "data_type": "ARRAY", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "times", "data_type": "ARRAY", "is_nullable": "YES", "column_default": null },
-  { "table_schema": "public", "table_name": "opportunities", "column_name": "requirements", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "application_type", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "is_active", "data_type": "boolean", "is_nullable": "YES", "column_default": "true" },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "created_at", "data_type": "timestamp with time zone", "is_nullable": "NO", "column_default": "now()" },
@@ -101,12 +100,11 @@ Onboarding per role
   { "table_schema": "public", "table_name": "opportunities", "column_name": "start_dt", "data_type": "timestamp with time zone", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "end_dt", "data_type": "timestamp with time zone", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "slots", "data_type": "integer", "is_nullable": "YES", "column_default": null },
-  { "table_schema": "public", "table_name": "opportunities", "column_name": "fcfs", "data_type": "boolean", "is_nullable": "YES", "column_default": "false" },
+  { "table_schema": " public", "table_name": "opportunities", "column_name": "fcfs", "data_type": "boolean", "is_nullable": "YES", "column_default": "false" },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "location", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "apply_url", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "contact_email", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "is_deleted", "data_type": "boolean", "is_nullable": "YES", "column_default": "false" },
-  { "table_schema": "public", "table_name": "opportunities", "column_name": "link", "data_type": "text", "is_nullable": "YES", "column_default": null },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "application_open", "data_type": "boolean", "is_nullable": "YES", "column_default": "true" },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "internal_application_enabled", "data_type": "boolean", "is_nullable": "YES", "column_default": "true" },
   { "table_schema": "public", "table_name": "opportunities", "column_name": "application_form", "data_type": "jsonb", "is_nullable": "NO", "column_default": "'[]'::jsonb" },
@@ -769,6 +767,22 @@ Update — Onboarding tags storage (Nov 9, 2025)
 - Onboarding tags are stored exclusively in `public.user_onboarding.tags` (type `text[]`).
 - For students, the UI also writes a deduplicated CSV of tags into `public.profiles.interests` for personalization. This column is optional and can be added if missing.
 - For students, only a single `age` is collected and persisted by setting both `min_age` and `max_age` in `public.user_onboarding`. Distance and preferred location are not collected during onboarding (students can filter later).
+
+**Internal vs External Opportunities**
+- **Internal**: An opportunity has `internal_application_enabled = TRUE`. These are opportunities managed by organizers through the platform (have an `organizer_id`).
+- **External**: An opportunity has `internal_application_enabled = FALSE`. These are opportunities without an organizer (no `organizer_id`).
+- The `internal_application_enabled` field is set automatically based on whether the opportunity has an `organizer_id`:
+  - Jobs with `organizer_id` (not null) → `internal_application_enabled = TRUE`
+  - Jobs without `organizer_id` (null) → `internal_application_enabled = FALSE`
+- The `application_open` field is used for internal opportunities to control whether applications are accepted.
+
+**Migration Notes**
+- The `link` column has been merged into `apply_url`. All data from `link` has been transferred to `apply_url` where `apply_url` was null or empty, and the `link` column has been dropped.
+- The `min_age` field has been extracted from the `requirements` field using regex pattern matching for the first number found.
+- The `requirements` column has been removed after data was moved to `min_age`.
+- The `internal_application_enabled` field is now automatically set based on `organizer_id`:
+  - Jobs with `organizer_id` → `internal_application_enabled = TRUE`
+  - Jobs without `organizer_id` → `internal_application_enabled = FALSE`
 
 Next steps
   - I can generate a small Node or Python script to automatically query the database catalogs and write this file in a consistent format, so you can refresh with a single command.

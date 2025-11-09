@@ -29,6 +29,7 @@ interface ExternalOpportunityCardProps {
     minAge?: number | null;
     maxAge?: number | null;
     applicationForm?: any;
+    stars?: number;
 }
 
 export function ExternalOpportunityCard({
@@ -57,6 +58,7 @@ export function ExternalOpportunityCard({
     minAge,
     maxAge,
     applicationForm,
+    stars,
 }: ExternalOpportunityCardProps) {
     const [appliedLocal, setAppliedLocal] = React.useState<boolean>(() => {
         try {
@@ -82,6 +84,12 @@ export function ExternalOpportunityCard({
     
     const isApplied = applied ?? appliedLocal;
     const is18Plus = typeof minAge === 'number' && minAge >= 18;
+    // Use isExternal prop if provided (based on internal_application_enabled from database)
+    // Otherwise, determine from applyUrl and applicationForm as fallback
+    const hasApplyUrl = !!applyUrl && applyUrl.trim() !== "";
+    const hasApplicationForm = applicationForm && Array.isArray(applicationForm) && applicationForm.length > 0;
+    const isActuallyExternal = typeof isExternal === 'boolean' ? isExternal : hasApplyUrl;
+    const isActuallyInternal = typeof isExternal === 'boolean' ? !isExternal : (hasApplicationForm && !hasApplyUrl);
     const hasInternalForm = !applyUrl && applicationForm && Array.isArray(applicationForm) && applicationForm.length >= 0; // >= 0 to include fallback form
     
     const handleApply = (e: React.MouseEvent) => {
@@ -126,20 +134,27 @@ export function ExternalOpportunityCard({
             <div className="mb-2">
                 <h3 className="text-sm font-semibold text-foreground mb-1 line-clamp-2 pr-12" title={title}>{title}</h3>
                 <div className="flex items-center gap-2 text-[10px] whitespace-nowrap overflow-x-auto">
-                    {/* Always show star rating - either from score or default to 3 stars */}
+                    {/* Always show star rating - use stars prop if available, otherwise calculate from score or default to 3 stars */}
                     <div className="flex items-center gap-0.5">
                         <div className="flex items-center gap-0.5">
                             {Array.from({ length: 5 }).map((_, i) => {
-                                const starsRounded = typeof score === 'number' 
-                                    ? Math.max(1, Math.min(5, Math.round((score || 0) / 10)))
-                                    : 3; // Default to 3 stars if no score
+                                let starsRounded = 3; // Default to 3 stars
+                                if (typeof stars === 'number' && stars > 0) {
+                                    starsRounded = Math.max(1, Math.min(5, Math.round(stars)));
+                                } else if (typeof score === 'number') {
+                                    starsRounded = Math.max(1, Math.min(5, Math.round((score || 0) / 10)));
+                                }
                                 return (
                                     <Star key={i} size={10} className={i < starsRounded ? 'text-yellow-500 fill-yellow-500' : 'text-muted-foreground'} />
                                 );
                             })}
                         </div>
                         <span className="text-[9px] text-yellow-600">
-                            {typeof score === 'number' ? ((score || 0)/10).toFixed(1) : '3.0'}
+                            {typeof stars === 'number' && stars > 0 
+                                ? stars.toFixed(1)
+                                : typeof score === 'number' 
+                                    ? ((score || 0)/10).toFixed(1) 
+                                    : '3.0'}
                         </span>
                     </div>
                     {typeof xpReward === 'number' && xpReward > 0 && (
@@ -147,7 +162,11 @@ export function ExternalOpportunityCard({
                     )}
                     {isApplied && (<Badge variant="outline" className="text-[9px] px-1.5 py-0.5">Applied</Badge>)}
                     {isRemote && (<Badge variant="secondary" className="text-[9px] px-1.5 py-0.5"><Globe size={10} className="mr-0.5"/>Remote</Badge>)}
-                    <Badge variant="outline" className="text-[9px] px-1.5 py-0.5">External</Badge>
+                    {isActuallyInternal ? (
+                        <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 border-blue-500/50">Internal</Badge>
+                    ) : isActuallyExternal ? (
+                        <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 bg-muted/60 text-muted-foreground">External</Badge>
+                    ) : null}
                 </div>
                 <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground min-w-0">
                     <Building2 size={10} />

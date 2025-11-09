@@ -17,6 +17,7 @@ export type JobDetails = {
   opportunityId?: string; // optional id to support apply actions
   applyUrl?: string;
   contactEmail?: string;
+  description?: string;
   applicationForm?: Array<{
     id: string;
     label: string;
@@ -278,19 +279,12 @@ export const JobDetailsDialog = ({ open, onOpenChange, job, onApply, stars, xp, 
             )}
           </div>
 
-          <div className="grid gap-2 text-sm">
-            <p className="text-foreground font-medium">What you'll do</p>
-            <p className="text-muted-foreground">Assist organizers, coordinate attendees, and help create a great experience for participants. Light setup and support during the event.</p>
-          </div>
-
-          <div className="grid gap-2 text-sm">
-            <p className="text-foreground font-medium">Requirements</p>
-            <ul className="text-muted-foreground list-disc pl-5 space-y-1">
-              <li>Comfortable working with people</li>
-              <li>Arrive 10 minutes early</li>
-              <li>Follow organizer instructions</li>
-            </ul>
-          </div>
+          {job.description && (
+            <div className="grid gap-2 text-sm">
+              <p className="text-foreground font-medium">What you'll do</p>
+              <p className="text-muted-foreground whitespace-pre-wrap">{job.description}</p>
+            </div>
+          )}
 
           {!job.applyUrl && (
             <div className="grid gap-3 text-sm">

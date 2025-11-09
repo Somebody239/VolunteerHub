@@ -59,6 +59,7 @@ type Application = {
   student_id: string;
   status: "applied" | "accepted" | "declined" | "waitlisted" | "withdrawn" | "done" | "verify";
   created_at: string | null;
+  answers_json?: Record<string, any> | null;
 };
 
 type Profile = { id: string; full_name: string | null };

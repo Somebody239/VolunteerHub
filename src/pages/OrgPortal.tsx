@@ -66,6 +66,7 @@ type Application = {
   student_id: string;
   status: "applied" | "accepted" | "declined" | "waitlisted" | "withdrawn" | "done" | "verify";
   created_at: string | null;
+  answers_json?: Record<string, any> | null;
 };
 
 type Profile = {
@@ -115,10 +116,18 @@ const OrgPortal: React.FC = () => {
   });
 
   const applicationsQuery = useQuery({
-    queryKey: ["applications", user?.id, (listQuery.data ?? []).map((o) => o.id).join(",")],
+    queryKey: ["applications", user?.id, "org"],
     queryFn: async (): Promise<(Application & { answers_json?: any })[]> => {
       if (!user) return [];
-      const oppIds = (listQuery.data ?? []).map((o) => o.id);
+      // Always fetch fresh opportunity list to avoid race conditions
+      // This ensures we get all applications even if opportunities were just created
+      const { data: opps, error: oppError } = await supabase
+        .from("opportunities")
+        .select("id")
+        .eq("organizer_id", user.id)
+        .eq("is_deleted", false);
+      if (oppError) throw oppError;
+      const oppIds = (opps ?? []).map((o) => o.id);
       if (oppIds.length === 0) return [];
       let q = supabase
         .from("applications")
@@ -137,8 +146,9 @@ const OrgPortal: React.FC = () => {
       console.log("Fetched applications:", data?.length, "for opportunities:", oppIds);
       return data ?? [];
     },
-    enabled: !!user && !!listQuery.data && (listQuery.data ?? []).length > 0,
+    enabled: !!user,
     refetchInterval: 10000, // Refetch every 10 seconds to catch new applications
+    refetchOnWindowFocus: true, // Refetch when user returns to tab
   });
 
   const studentIds = useMemo(() => Array.from(new Set((applicationsQuery.data ?? []).map((a) => a.student_id))), [applicationsQuery.data]);

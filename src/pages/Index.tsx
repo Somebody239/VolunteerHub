@@ -112,7 +112,7 @@ const Index = () => {
       const { data, error } = await supabase
         .from("opportunities")
         .select(
-          "id, organizer_id, title, description, category, location, start_dt, end_dt, slots, tags, apply_url, contact_email, is_deleted, application_form, min_age, max_age",
+          "id, organizer_id, title, description, category, location, start_dt, end_dt, slots, tags, apply_url, contact_email, is_deleted, application_form, min_age, max_age, internal_application_enabled",
         )
         .eq("is_deleted", false)
         .order("start_dt", { ascending: true, nullsFirst: false })
@@ -161,7 +161,7 @@ const Index = () => {
       if (!user) return [];
       const { data, error } = await supabase
         .from("applications")
-        .select("id, opportunity_id, student_id, status, created_at")
+        .select("id, opportunity_id, student_id, status, created_at, answers_json")
         .eq("student_id", user.id)
         .order("created_at", { ascending: false })
       if (error) throw error;
@@ -376,25 +376,34 @@ const Index = () => {
     );
     const list = (opportunitiesQuery.data ?? [])
       .filter((o: any) => !o.is_deleted)
-      .map<JobDetails & { opportunityId: string; tags?: string[]; applicationForm?: any[]; min_age?: number | null; max_age?: number | null }>((o) => ({
-        title: o.title,
-        organization: orgMap.get(o.organizer_id) ?? "Organizer",
-        date: o.start_dt ? new Date(o.start_dt).toLocaleString() : "TBD",
-        location: o.location ?? undefined,
-        duration:
-          o.start_dt && o.end_dt
-            ? `${Math.max(0, (new Date(o.end_dt).getTime() - new Date(o.start_dt).getTime()) / 3600000)} hours`
-            : undefined,
-        spots: o.slots ?? undefined,
-        category: o.category,
-        tags: (o.tags ?? undefined) as unknown as string[] | undefined,
-        opportunityId: o.id,
-        applyUrl: o.apply_url ?? undefined,
-        contactEmail: o.contact_email ?? undefined,
-        applicationForm: (o.application_form ?? undefined) as any[] | undefined,
-        min_age: o.min_age ?? null,
-        max_age: o.max_age ?? null,
-      }));
+      .map<JobDetails & { opportunityId: string; tags?: string[]; applicationForm?: any[]; min_age?: number | null; max_age?: number | null; isExternal?: boolean }>((o) => {
+        // Determine if internal or external based on internal_application_enabled
+        // Internal: internal_application_enabled = TRUE
+        // External: internal_application_enabled = FALSE
+        const isInternal = o.internal_application_enabled === true;
+        const isExternal = !isInternal;
+        
+        return {
+          title: o.title,
+          organization: orgMap.get(o.organizer_id) ?? "Organizer",
+          date: o.start_dt ? new Date(o.start_dt).toLocaleString() : "TBD",
+          location: o.location ?? undefined,
+          duration:
+            o.start_dt && o.end_dt
+              ? `${Math.max(0, (new Date(o.end_dt).getTime() - new Date(o.start_dt).getTime()) / 3600000)} hours`
+              : undefined,
+          spots: o.slots ?? undefined,
+          category: o.category,
+          tags: (o.tags ?? undefined) as unknown as string[] | undefined,
+          opportunityId: o.id,
+          applyUrl: o.apply_url ?? undefined,
+          contactEmail: o.contact_email ?? undefined,
+          applicationForm: (o.application_form ?? undefined) as any[] | undefined,
+          min_age: o.min_age ?? null,
+          max_age: o.max_age ?? null,
+          isExternal: isExternal,
+        };
+      });
     const qFiltered = list.filter((o) => {
       const matchesQuery = [o.title, o.organization, o.location, o.category]
         .filter(Boolean)
@@ -466,6 +475,16 @@ const Index = () => {
     }) => {
       if (!user) throw new Error("Please sign in to apply");
       if (!payloadIn.id) throw new Error("Missing opportunity id");
+      
+      // Get the opportunity to find the organizer_id for query invalidation
+      const { data: opportunity, error: oppError } = await supabase
+        .from("opportunities")
+        .select("organizer_id")
+        .eq("id", payloadIn.id)
+        .single();
+      
+      if (oppError) throw oppError;
+      
       const payload = {
         opportunity_id: payloadIn.id,
         student_id: user.id,
@@ -479,11 +498,30 @@ const Index = () => {
         .select("id")
         .single();
       if (error) throw error;
-      // Keep status as 'applied' (In review) until organizer updates it
+      
+      // Return organizer_id for query invalidation
+      return { organizer_id: opportunity?.organizer_id };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       toast({ title: "Application submitted" });
+      // Invalidate student's own applications
       qc.invalidateQueries({ queryKey: ["applications", user?.id] });
+      // Invalidate opportunities query to refresh stats
+      qc.invalidateQueries({ queryKey: ["opportunities", "home"] });
+      // Invalidate org dashboard queries if organizer_id exists
+      if (data?.organizer_id) {
+        // Invalidate all application queries for this organizer (regardless of opportunity IDs in key)
+        qc.invalidateQueries({ 
+          predicate: (query) => {
+            const key = query.queryKey;
+            return Array.isArray(key) && 
+                   key[0] === "applications" && 
+                   key[1] === data.organizer_id;
+          }
+        });
+        // Invalidate opportunities query to trigger applications query refetch
+        qc.invalidateQueries({ queryKey: ["opportunities", data.organizer_id] });
+      }
       pushNotification({
         kind: "success",
         text: "Your application was submitted.",
@@ -975,43 +1013,91 @@ const Index = () => {
             {(opportunitiesQuery.data ?? [])
               .slice(0, 6)
               .map((item, index) => {
-                const metrics = computeScoreAndXp(item);
+                // Map raw opportunity data to the format expected by ExternalOpportunityCard
+                const orgMap = new Map(
+                  (organizationsQuery.data ?? []).map((o) => [o.id, o.name] as const),
+                );
+                const orgName = orgMap.get(item.organizer_id) ?? "Organizer";
+                
+                // Determine if internal or external based on internal_application_enabled
+                // Internal: internal_application_enabled = TRUE
+                // External: internal_application_enabled = FALSE
+                const isInternal = item.internal_application_enabled === true;
+                const isExternal = !isInternal;
+                
+                // Calculate duration from start_dt and end_dt
+                let duration: string | undefined = undefined;
+                if (item.start_dt && item.end_dt) {
+                  const start = new Date(item.start_dt);
+                  const end = new Date(item.end_dt);
+                  const hours = Math.max(0, (end.getTime() - start.getTime()) / 3600000);
+                  if (hours > 0) {
+                    duration = `${hours.toFixed(1)} hours`;
+                  }
+                }
+                
+                const mappedItem = {
+                  title: item.title,
+                  organization: orgName,
+                  date: item.start_dt ? new Date(item.start_dt).toLocaleString() : "TBD",
+                  location: item.location ?? undefined,
+                  duration: duration,
+                  spots: item.slots ?? undefined,
+                  category: item.category,
+                  tags: (item.tags ?? []) as string[] | undefined,
+                  opportunityId: item.id,
+                  applyUrl: item.apply_url ?? undefined,
+                  contactEmail: item.contact_email ?? undefined,
+                  isExternal: isExternal,
+                  externalUrl: item.apply_url || "",
+                  description: item.description || "",
+                  activities: [],
+                  isRemote: false,
+                  coordinates: undefined,
+                  minAge: item.min_age ?? undefined,
+                  maxAge: item.max_age ?? undefined,
+                  applicationForm: (item.application_form ?? []) as any[] | undefined,
+                };
+                
+                const metrics = computeScoreAndXp(mappedItem);
               return (
               <div key={index} className="h-full w-full">
                     <ExternalOpportunityCard
-                      {...item}
+                      {...mappedItem}
+                      isExternal={isExternal}
                       score={metrics.score}
                       xpReward={metrics.xp}
-                      minAge={item.min_age}
-                      maxAge={item.max_age}
-                      applicationForm={item.applicationForm}
-                      applied={hasApplied(item.opportunityId)}
+                      minAge={mappedItem.minAge}
+                      maxAge={mappedItem.maxAge}
+                      applicationForm={mappedItem.applicationForm}
+                      applied={hasApplied(item.id)}
                   onClick={() => {
                         setSelected({
-                          title: item.title,
-                          organization: item.organization,
-                          date: item.date,
-                          location: item.location,
-                          duration: item.duration,
-                          spots: item.spots,
-                          category: item.category,
-                          opportunityId: item.opportunityId,
-                          applyUrl: item.applyUrl,
-                          contactEmail: item.contactEmail,
-                          applicationForm: item.applicationForm,
+                          title: mappedItem.title,
+                          organization: mappedItem.organization,
+                          date: mappedItem.date,
+                          location: mappedItem.location,
+                          duration: mappedItem.duration,
+                          spots: mappedItem.spots,
+                          category: mappedItem.category,
+                          opportunityId: mappedItem.opportunityId,
+                          applyUrl: mappedItem.applyUrl,
+                          contactEmail: mappedItem.contactEmail,
+                          applicationForm: mappedItem.applicationForm,
+                          isExternal: isExternal,
                         });
                     setOpen(true);
                   }}
                       onApply={async (opportunityId, title) => {
-                        // This should NOT be called for internal applications
+                        // Only handle external applications here
                         // Internal applications are handled by the dialog's onApply which uses applyMutation
-                        if (!externalAppsService) return;
+                        if (!isExternal || !externalAppsService) return;
                         
                         try {
                           const success = await externalAppsService.createApplication({
                             opportunity_id: opportunityId,
                             title,
-                            organization: item.organization,
+                            organization: mappedItem.organization,
                             date_applied: new Date().toISOString().split('T')[0],
                             hours_worked: 0,
                             status: "applied",
@@ -1173,13 +1259,13 @@ const Index = () => {
             if (!selected) return;
             
             // Determine if this is an internal (organizer-created) or external opportunity
-            // Internal: no applyUrl OR has applicationForm (organizer manages it)
-            // External: has applyUrl AND no applicationForm (external link)
-            const hasApplyUrl = !!selected.applyUrl;
-            const hasApplicationForm = selected.applicationForm && Array.isArray(selected.applicationForm) && selected.applicationForm.length >= 0;
-            const isInternal = !hasApplyUrl || hasApplicationForm;
+            // Use isExternal from the item (based on internal_application_enabled from database)
+            // Internal: internal_application_enabled = TRUE
+            // External: internal_application_enabled = FALSE
+            const isExternal = selected.isExternal ?? false;
+            const isInternal = !isExternal;
             
-            if (!isInternal && hasApplyUrl) {
+            if (isExternal) {
               // Handle external application (has applyUrl, no internal form)
               if (!externalAppsService) return;
               
@@ -1699,12 +1785,39 @@ const Index = () => {
               );
             })}
 
-            {/* Internal applications - View-only (managed by organizer) */}
+            {/* Applications from applications table - Check database for internal/external */}
             {applicationsQuery.data?.filter(a => !['declined', 'withdrawn'].includes(a.status)).map((a) => {
               const opp = (opportunitiesQuery.data ?? []).find(
                 (o) => o.id === a.opportunity_id,
               );
               const orgName = opp ? (organizationsQuery.data ?? []).find(org => org.id === opp.organizer_id)?.name : null;
+              
+              // Check database value for internal_application_enabled from opportunities table
+              // Match the exact logic used in filtered list (line 383) and recommended section (line 996)
+              // Internal: internal_application_enabled === true
+              // External: internal_application_enabled !== true (false, null, undefined)
+              // If opp not found, skip this application (shouldn't happen but handle gracefully)
+              if (!opp) {
+                console.warn(`Opportunity not found for application ${a.id}, opportunity_id: ${a.opportunity_id}`);
+                return null;
+              }
+              
+              // Debug: Log the opportunity data to see what we're checking
+              console.log(`Application ${a.id} - Opportunity ${opp.id}:`, {
+                title: opp.title,
+                internal_application_enabled: opp.internal_application_enabled,
+                type: typeof opp.internal_application_enabled,
+                organizer_id: opp.organizer_id
+              });
+              
+              // Check internal_application_enabled the same way as everywhere else
+              // Internal: internal_application_enabled === true
+              // External: !isInternal (false, null, undefined)
+              const isInternal = opp.internal_application_enabled === true;
+              const isExternal = !isInternal;
+              
+              // Debug: Log the result
+              console.log(`Application ${a.id} - isInternal: ${isInternal}, isExternal: ${isExternal}`);
               const isExpanded = expandedAppId === `int:${a.id}`;
               const statusConfig = {
                 applied: { color: "text-yellow-300", bg: "bg-yellow-900/30", dot: "bg-yellow-500", border: "border-yellow-600/50", glow: "shadow-yellow-500/30", label: "In Review" },
@@ -1735,9 +1848,16 @@ const Index = () => {
                             <h3 className="font-medium text-foreground truncate" title={opp?.title ?? "Opportunity"}>
                               {opp?.title ?? "Opportunity"}
                             </h3>
-                            <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 text-[10px] font-medium flex-shrink-0">
-                              Internal
-                            </span>
+                            {/* Show badge based on database value */}
+                            {isInternal ? (
+                              <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 text-[10px] font-medium flex-shrink-0">
+                                Internal
+                              </span>
+                            ) : isExternal ? (
+                              <span className="px-2 py-0.5 rounded-full bg-muted/60 text-muted-foreground text-[10px] font-medium flex-shrink-0">
+                                External
+                              </span>
+                            ) : null}
                           </div>
                           <div className="flex items-center gap-4 text-xs text-muted-foreground">
                             {orgName && <span>{orgName}</span>}
@@ -1781,57 +1901,113 @@ const Index = () => {
                     </div>
                   </div>
 
-                  {/* Expandable details section - VIEW ONLY */}
+                  {/* Expandable details section - Editable if external, View-only if internal */}
                   {isExpanded && (
                     <div className="px-4 pb-4 border-t border-border/50 pt-3 bg-muted/10">
-                      <div className="space-y-3">
-                        <div className="flex items-start gap-2">
-                          <div className="w-2 h-2 rounded-full bg-blue-500 mt-1.5 flex-shrink-0"></div>
-                          <div className="flex-1">
-                            <p className="text-xs font-medium text-foreground mb-1">Application Details</p>
-                            <p className="text-[11px] text-muted-foreground">
-                              This is an internal application managed by the organizer. You cannot edit the status or hours.
+                      {isExternal ? (
+                        // External - Editable (update status in applications table)
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+                            {[
+                              { key: 'applied', label: 'Applied', baseColor: 'bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-300 border-yellow-600/50', activeColor: 'bg-yellow-800/50 text-yellow-200 border-yellow-500 shadow-yellow-500/20', glowColor: 'shadow-yellow-500/30' },
+                              { key: 'accepted', label: 'Accepted', baseColor: 'bg-green-900/30 hover:bg-green-800/40 text-green-300 border-green-600/50', activeColor: 'bg-green-800/50 text-green-200 border-green-500 shadow-green-500/20', glowColor: 'shadow-green-500/30' },
+                              { key: 'rejected', label: 'Rejected', baseColor: 'bg-red-900/30 hover:bg-red-800/40 text-red-300 border-red-600/50', activeColor: 'bg-red-800/50 text-red-200 border-red-500 shadow-red-500/20', glowColor: 'shadow-red-500/30' },
+                              { key: 'done', label: 'Completed', baseColor: 'bg-blue-900/30 hover:bg-blue-800/40 text-blue-300 border-blue-600/50', activeColor: 'bg-blue-800/50 text-blue-200 border-blue-500 shadow-blue-500/20', glowColor: 'shadow-blue-500/30' },
+                              { key: 'cancelled', label: 'Cancelled', baseColor: 'bg-gray-900/30 hover:bg-gray-800/40 text-gray-300 border-gray-600/50', activeColor: 'bg-gray-800/50 text-gray-200 border-gray-500 shadow-gray-500/20', glowColor: 'shadow-gray-500/30' }
+                            ].map((status) => (
+                              <button
+                                key={status.key}
+                                onClick={async () => {
+                                  const newStatus = status.key as any;
+                                  try {
+                                    const { error } = await supabase
+                                      .from("applications")
+                                      .update({ status: newStatus })
+                                      .eq("id", a.id);
+                                    if (error) {
+                                      toast({
+                                        title: "Status update failed",
+                                        description: error.message,
+                                        variant: "destructive",
+                                      });
+                                      return;
+                                    }
+                                    qc.invalidateQueries({
+                                      queryKey: ["applications", user?.id],
+                                    });
+                                    toast({ title: "Status updated successfully" });
+                                  } catch (err: any) {
+                                    console.error('Error updating status:', err);
+                                    toast({
+                                      title: "Error",
+                                      description: "Failed to update status",
+                                      variant: "destructive",
+                                    });
+                                  }
+                                }}
+                                className={`px-2 py-1.5 rounded-lg text-[10px] font-medium border transition-all duration-200 ${
+                                  a.status === status.key ? status.activeColor : status.baseColor
+                                } ${a.status === status.key ? status.glowColor : ''}`}
+                              >
+                                {status.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            <p>External application - You can edit the status. The organizer may also update it.</p>
+                          </div>
+                        </div>
+                      ) : (
+                        // Internal - View-only (managed by organizer)
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-2">
+                            <div className="w-2 h-2 rounded-full bg-blue-500 mt-1.5 flex-shrink-0"></div>
+                            <div className="flex-1">
+                              <p className="text-xs font-medium text-foreground mb-1">Application Details</p>
+                              <p className="text-[11px] text-muted-foreground">
+                                This is an internal application managed by the organizer. You cannot edit the status or hours.
+                              </p>
+                            </div>
+                          </div>
+
+                          {a.answers_json && (
+                            <div className="flex items-start gap-2">
+                              <div className="w-2 h-2 rounded-full bg-purple-500 mt-1.5 flex-shrink-0"></div>
+                              <div className="flex-1">
+                                <p className="text-xs font-medium text-foreground mb-2">Your Responses</p>
+                                <div className="space-y-2 text-[11px]">
+                                  {typeof a.answers_json === 'object' && Object.entries(a.answers_json as Record<string, any>).map(([key, value]) => (
+                                    <div key={key} className="bg-background/50 p-2 rounded">
+                                      <p className="font-medium text-foreground mb-0.5">{key}</p>
+                                      <p className="text-muted-foreground">{String(value)}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {opp && (
+                            <div className="flex items-start gap-2">
+                              <div className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"></div>
+                              <div className="flex-1">
+                                <p className="text-xs font-medium text-foreground mb-1">Opportunity Info</p>
+                                <div className="text-[11px] text-muted-foreground space-y-1">
+                                  {opp.location && <p>📍 {opp.location}</p>}
+                                  {opp.start_dt && <p>📅 {new Date(opp.start_dt).toLocaleDateString()}</p>}
+                                  {opp.contact_email && <p>✉️ {opp.contact_email}</p>}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="pt-2 border-t border-border/30">
+                            <p className="text-[10px] text-muted-foreground italic">
+                              💡 The organizer will review your application and update the status. You'll be notified of any changes.
                             </p>
                           </div>
                         </div>
-
-                        {a.answers_json && (
-                          <div className="flex items-start gap-2">
-                            <div className="w-2 h-2 rounded-full bg-purple-500 mt-1.5 flex-shrink-0"></div>
-                            <div className="flex-1">
-                              <p className="text-xs font-medium text-foreground mb-2">Your Responses</p>
-                              <div className="space-y-2 text-[11px]">
-                                {typeof a.answers_json === 'object' && Object.entries(a.answers_json as Record<string, any>).map(([key, value]) => (
-                                  <div key={key} className="bg-background/50 p-2 rounded">
-                                    <p className="font-medium text-foreground mb-0.5">{key}</p>
-                                    <p className="text-muted-foreground">{String(value)}</p>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {opp && (
-                          <div className="flex items-start gap-2">
-                            <div className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"></div>
-                            <div className="flex-1">
-                              <p className="text-xs font-medium text-foreground mb-1">Opportunity Info</p>
-                              <div className="text-[11px] text-muted-foreground space-y-1">
-                                {opp.location && <p>📍 {opp.location}</p>}
-                                {opp.start_dt && <p>📅 {new Date(opp.start_dt).toLocaleDateString()}</p>}
-                                {opp.contact_email && <p>✉️ {opp.contact_email}</p>}
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="pt-2 border-t border-border/30">
-                          <p className="text-[10px] text-muted-foreground italic">
-                            💡 The organizer will review your application and update the status. You'll be notified of any changes.
-                          </p>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   )}
                 </div>

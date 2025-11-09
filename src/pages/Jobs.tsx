@@ -157,14 +157,43 @@ const Jobs = () => {
 
   // Geolocation query (fallback to GPS)
 
+  // Fetch organizations for mapping organizer_id to organization name
+  const organizationsQuery = useQuery({
+    queryKey: ["organizations", "all"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("organizations")
+        .select("id, name");
+      if (error) throw error;
+      return data ?? [];
+    },
+    staleTime: 10 * 60 * 1000, // 10 minutes - organizations change very infrequently
+  });
+
+  // Ratings aggregation from the opportunity_ratings view
+  const ratingsQuery = useQuery({
+    queryKey: ["opportunity_ratings"],
+    queryFn: async (): Promise<Array<{ opportunity_id: string; avg_rating: number; ratings_count: number }>> => {
+      const { data, error} = await supabase
+        .from("opportunity_ratings")
+        .select("opportunity_id, avg_rating, ratings_count");
+      if (error) {
+        console.warn("Could not fetch opportunity_ratings view:", error);
+        return [];
+      }
+      return data as any[];
+    },
+    staleTime: 60 * 1000,
+  });
+
   // Volunteer opportunities query (always enabled)
   const opportunitiesQuery = useQuery({
     queryKey: ["opportunities", "jobs"],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("opportunities")
-        .select("*") // You can replace * with your specific columns if desired
-        .eq("is_deleted", false) // Add other filters as you need
+        .select("id, organizer_id, title, description, category, location, start_dt, end_dt, slots, tags, apply_url, contact_email, is_deleted, application_form, min_age, max_age, internal_application_enabled, application_open")
+        .eq("is_deleted", false)
         .order("start_dt", { ascending: true, nullsFirst: false });
       if (error) throw error;
       return data ?? [];
@@ -238,9 +267,14 @@ const Jobs = () => {
   // Volunteer opportunities filtering
   const filtered = useMemo(() => {
     const opportunities = opportunitiesQuery.data ?? [];
+    const orgMap = new Map(
+      (organizationsQuery.data ?? []).map((o) => [o.id, o.name] as const),
+    );
+    
     return opportunities
       .filter((o) => {
-        const matchesQuery = [o.title, o.organization, o.location, o.category]
+        const orgName = orgMap.get(o.organizer_id) ?? "";
+        const matchesQuery = [o.title, orgName, o.location, o.category]
           .filter(Boolean)
           .some((v) => v!.toLowerCase().includes(query.toLowerCase()));
         const matchesCat =
@@ -254,6 +288,36 @@ const Jobs = () => {
           (o.location ?? "")
             .toLowerCase()
             .includes(locationQuery.toLowerCase());
+        
+        // Date range filtering - check if opportunity overlaps with selected date range
+        let dateOk = true;
+        if (dateFrom || dateTo) {
+          const oppStart = o.start_dt ? new Date(o.start_dt) : null;
+          const oppEnd = o.end_dt ? new Date(o.end_dt) : null;
+          const filterFrom = dateFrom ? new Date(dateFrom) : null;
+          const filterTo = dateTo ? new Date(dateTo) : null;
+          
+          // If opportunity has no dates, include it if no date filters are set
+          if (!oppStart && !oppEnd) {
+            dateOk = true;
+          } else {
+            // Check if opportunity overlaps with filter range
+            // Opportunity overlaps if:
+            // - Opportunity starts before or on filter end date, AND
+            // - Opportunity ends after or on filter start date (or has no end date)
+            if (filterFrom && filterTo) {
+              // Both dates specified - check overlap
+              dateOk = (!oppStart || oppStart <= filterTo) && (!oppEnd || oppEnd >= filterFrom);
+            } else if (filterFrom) {
+              // Only start date specified - opportunity must end on or after filter start
+              dateOk = !oppEnd || oppEnd >= filterFrom;
+            } else if (filterTo) {
+              // Only end date specified - opportunity must start on or before filter end
+              dateOk = !oppStart || oppStart <= filterTo;
+            }
+          }
+        }
+        
         // Age range overlap if filters provided
         const minA = typeof o.min_age === "number" ? o.min_age : null;
         const maxA = typeof o.max_age === "number" ? o.max_age : null;
@@ -269,39 +333,63 @@ const Jobs = () => {
           matchesCat &&
           matchesTags &&
           locOk &&
+          dateOk &&
           ageOk
         );
       })
-      .map((o) => ({
-        title: o.title,
-        organization: o.organization || "Unknown",
-        date: o.start_dt ? new Date(o.start_dt).toLocaleDateString() : "TBD",
-        location: o.location,
-        duration: o.start_dt && o.end_dt 
-          ? `${Math.max(0, (new Date(o.end_dt).getTime() - new Date(o.start_dt).getTime()) / 3600000).toFixed(1)} hours`
-          : undefined,
-        spots: o.slots,
-        category: o.category,
-        tags: o.tags as string[] | undefined,
-        opportunityId: o.id,
-        applyUrl: o.apply_url,
-        contactEmail: o.contact_email,
-        isExternal: false,
-        externalUrl: o.apply_url || "",
-        description: o.description || "",
-        activities: [],
-        isRemote: false,
-        coordinates: undefined,
-        minAge: o.min_age,
-        maxAge: o.max_age,
-        applicationForm: o.application_form,
-      }));
+      .map((o) => {
+        const orgName = orgMap.get(o.organizer_id) ?? "Unknown Organization";
+        // Determine if internal or external based on internal_application_enabled from database
+        // Internal: internal_application_enabled = TRUE
+        // External: internal_application_enabled = FALSE
+        const isInternal = o.internal_application_enabled === true;
+        const isExternal = !isInternal;
+        
+        // Calculate duration from start_dt and end_dt
+        let duration: string | undefined = undefined;
+        if (o.start_dt && o.end_dt) {
+          const start = new Date(o.start_dt);
+          const end = new Date(o.end_dt);
+          const hours = Math.max(0, (end.getTime() - start.getTime()) / 3600000);
+          if (hours > 0) {
+            duration = `${hours.toFixed(1)} hours`;
+          }
+        }
+        
+        return {
+          title: o.title,
+          organization: orgName,
+          date: o.start_dt ? new Date(o.start_dt).toLocaleDateString() : "TBD",
+          location: o.location ?? undefined,
+          duration: duration,
+          spots: o.slots ?? undefined,
+          category: o.category,
+          tags: (o.tags ?? []) as string[] | undefined,
+          opportunityId: o.id,
+          applyUrl: o.apply_url ?? undefined,
+          contactEmail: o.contact_email ?? undefined,
+          isExternal: isExternal,
+          externalUrl: o.apply_url || "",
+          description: o.description || "",
+          activities: [],
+          isRemote: false,
+          coordinates: undefined,
+          minAge: o.min_age ?? undefined,
+          maxAge: o.max_age ?? undefined,
+          applicationForm: (o.application_form ?? []) as any[] | undefined,
+          internalApplicationEnabled: o.internal_application_enabled ?? false,
+          applicationOpen: o.application_open ?? true,
+        };
+      });
   }, [
     opportunitiesQuery.data,
+    organizationsQuery.data,
     query,
     activeCategories,
     activeTags,
     locationQuery,
+    dateFrom,
+    dateTo,
     ageMin,
     ageMax,
   ]);
@@ -372,6 +460,20 @@ const Jobs = () => {
     );
   }, [profileQuery.data]);
 
+  // Precompute ratings map from the view
+  const ratingsMap = useMemo(() => {
+    const map = new Map<string, { avg: number; count: number }>();
+    const rows = ratingsQuery.data ?? [];
+    for (const r of rows) {
+      if (!r || !r.opportunity_id) continue;
+      map.set(r.opportunity_id, {
+        avg: Number(r.avg_rating) || 0,
+        count: Number(r.ratings_count) || 0
+      });
+    }
+    return map;
+  }, [ratingsQuery.data]);
+
   const computeScoreAndXp = (item: any): { score: number; xp: number; stars: number } => {
     let score = 0;
     const titleTokens = item.title.toLowerCase().split(/\s+/);
@@ -395,7 +497,14 @@ const Jobs = () => {
       if (!isNaN(dist)) score += dist < 5 ? 10 : dist < 20 ? 6 : dist < 50 ? 3 : 0;
     }
     const xp = Math.round(Math.max(0, hours) * 2); // Changed from 10x to 2x for more reasonable rewards
-    const stars = hours >= 16 ? 5 : hours >= 8 ? 4 : hours > 0 ? 3 : 3; // Default to 3 stars
+    // Stars from aggregated ratings if available; fallback to hours-based heuristic
+    let stars = 0;
+    if (item.opportunityId && ratingsMap.has(item.opportunityId)) {
+      const r = ratingsMap.get(item.opportunityId)!;
+      stars = Math.max(1, Math.min(5, Math.round(r.avg)));
+    } else {
+      stars = hours >= 16 ? 5 : hours >= 8 ? 4 : hours > 0 ? 3 : 3; // Default to 3 stars
+    }
     return { score, xp, stars };
   };
 
@@ -515,9 +624,19 @@ const Jobs = () => {
                 activeTags.length > 0 ||
                 dateFrom ||
                 dateTo ||
-                locationQuery) && (
+                locationQuery ||
+                ageMin ||
+                ageMax) && (
                 <span className="ml-1 text-xs bg-primary text-primary-foreground px-1.5 py-0.5 rounded-full">
-                  {[activeCategories.length, activeTags.length, dateFrom ? 1 : 0, dateTo ? 1 : 0, locationQuery ? 1 : 0].reduce((a, b) => a + b, 0)}
+                  {[
+                    activeCategories.length, 
+                    activeTags.length, 
+                    dateFrom ? 1 : 0, 
+                    dateTo ? 1 : 0, 
+                    locationQuery ? 1 : 0,
+                    ageMin ? 1 : 0,
+                    ageMax ? 1 : 0
+                  ].reduce((a, b) => a + b, 0)}
                 </span>
               )}
             </span>
@@ -525,7 +644,9 @@ const Jobs = () => {
               activeTags.length > 0 ||
               dateFrom ||
               dateTo ||
-              locationQuery) && (
+              locationQuery ||
+              ageMin ||
+              ageMax) && (
                 <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-primary border-2 border-background"></span>
               )}
           </button>
@@ -731,6 +852,8 @@ const Jobs = () => {
                     setDateFrom("");
                     setDateTo("");
                     setLocationQuery("");
+                    setAgeMin("");
+                    setAgeMax("");
                   }}
                   className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors w-full sm:w-auto"
                 >
@@ -768,8 +891,26 @@ const Jobs = () => {
                   // Stacked mode - only show first 8 cards stacked
                   filtered
                     .filter((it) => !dismissedIds.includes(it.opportunityId))
-                    .slice(0, 8)
                     .map((it) => ({ it, m: computeScoreAndXp(it) }))
+                    .sort((a, b) => {
+                      if (sortBy === "xp") return b.m.xp - a.m.xp;
+                      if (sortBy === "stars") return b.m.stars - a.m.stars;
+                      if (sortBy === "slots") {
+                        const slotsA = a.it.spots ?? 0;
+                        const slotsB = b.it.spots ?? 0;
+                        return slotsB - slotsA; // More slots first
+                      }
+                      if (sortBy === "soonest") {
+                        // Sort by start date - soonest first
+                        const oppA = (opportunitiesQuery.data ?? []).find(o => o.id === a.it.opportunityId);
+                        const oppB = (opportunitiesQuery.data ?? []).find(o => o.id === b.it.opportunityId);
+                        const dateA = oppA?.start_dt ? new Date(oppA.start_dt).getTime() : Infinity;
+                        const dateB = oppB?.start_dt ? new Date(oppB.start_dt).getTime() : Infinity;
+                        return dateA - dateB; // Soonest first
+                      }
+                      return 0;
+                    })
+                    .slice(0, 8)
                     .map(({ it: item, m: metrics }, idx) => {
                       const enableSwipe = idx === 0;
                       
@@ -797,8 +938,10 @@ const Jobs = () => {
                             opportunityId: item.opportunityId,
                             applyUrl: item.externalUrl,
                             contactEmail: item.contactEmail,
+                            description: item.description,
+                            applicationForm: item.applicationForm,
                           });
-                          setSelectedMetrics({ stars: Math.max(0, Math.min(5, Math.round((metrics.score || 0) / 10))), xp: metrics.xp });
+                          setSelectedMetrics({ stars: Math.max(0, Math.min(5, metrics.stars || 0)), xp: metrics.xp });
                           setDetailsOpen2(true);
                         }}
                         onTouchStart={(e) => {
@@ -853,11 +996,15 @@ const Jobs = () => {
                         <div className="mt-1 flex items-center gap-3 text-[11px] whitespace-nowrap overflow-x-auto">
                           <div className="flex items-center gap-0.5">
                             {Array.from({ length: 5 }).map((_, i) => (
-                              <span key={i} className={i < Math.max(0, Math.min(5, Math.round((metrics.score || 0) / 10))) ? 'text-yellow-500' : 'text-muted-foreground'}>★</span>
+                              <span key={i} className={i < Math.max(0, Math.min(5, metrics.stars || 0)) ? 'text-yellow-500' : 'text-muted-foreground'}>★</span>
                             ))}
                           </div>
                           <span className="text-[11px] font-medium text-green-600">+{metrics.xp} XP</span>
-                          <span className="px-2 py-0.5 rounded-full border text-[10px]">External</span>
+                          {item.isExternal ? (
+                            <span className="px-2 py-0.5 rounded-full border text-[10px] bg-muted/60 text-muted-foreground">External</span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full border text-[10px] bg-blue-500/20 text-blue-400 border-blue-500/50">Internal</span>
+                          )}
                         </div>
                         <div className="mt-1 inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border w-max"><CalendarDays size={12} />{item.date}</div>
                         <div className="mt-1 text-xs text-muted-foreground truncate">{item.organization}</div>
@@ -872,6 +1019,24 @@ const Jobs = () => {
                   filtered
                     .filter((it) => !dismissedIds.includes(it.opportunityId))
                     .map((it) => ({ it, m: computeScoreAndXp(it) }))
+                    .sort((a, b) => {
+                      if (sortBy === "xp") return b.m.xp - a.m.xp;
+                      if (sortBy === "stars") return b.m.stars - a.m.stars;
+                      if (sortBy === "slots") {
+                        const slotsA = a.it.spots ?? 0;
+                        const slotsB = b.it.spots ?? 0;
+                        return slotsB - slotsA; // More slots first
+                      }
+                      if (sortBy === "soonest") {
+                        // Sort by start date - soonest first
+                        const oppA = (opportunitiesQuery.data ?? []).find(o => o.id === a.it.opportunityId);
+                        const oppB = (opportunitiesQuery.data ?? []).find(o => o.id === b.it.opportunityId);
+                        const dateA = oppA?.start_dt ? new Date(oppA.start_dt).getTime() : Infinity;
+                        const dateB = oppB?.start_dt ? new Date(oppB.start_dt).getTime() : Infinity;
+                        return dateA - dateB; // Soonest first
+                      }
+                      return 0;
+                    })
                     .map(({ it: item, m: metrics }, idx) => (
                       <div 
                         key={`${item.opportunityId}-carousel-${idx}`} 
@@ -892,8 +1057,10 @@ const Jobs = () => {
                               opportunityId: item.opportunityId,
                               applyUrl: item.externalUrl,
                               contactEmail: item.contactEmail,
+                              description: item.description,
+                              applicationForm: item.applicationForm,
                             });
-                            setSelectedMetrics({ stars: Math.max(0, Math.min(5, Math.round((metrics.score || 0) / 10))), xp: metrics.xp });
+                            setSelectedMetrics({ stars: Math.max(0, Math.min(5, metrics.stars || 0)), xp: metrics.xp });
                             setDetailsOpen2(true);
                           }}
                         >
@@ -901,11 +1068,15 @@ const Jobs = () => {
                           <div className="mt-1 flex items-center gap-2 text-[11px] whitespace-nowrap overflow-x-auto">
                             <div className="flex items-center gap-0.5">
                               {Array.from({ length: 5 }).map((_, i) => (
-                                <span key={i} className={i < Math.max(0, Math.min(5, Math.round((metrics.score || 0) / 10))) ? 'text-yellow-500' : 'text-muted-foreground'}>★</span>
+                                <span key={i} className={i < Math.max(0, Math.min(5, metrics.stars || 0)) ? 'text-yellow-500' : 'text-muted-foreground'}>★</span>
                               ))}
                             </div>
                             <span className="text-[11px] font-medium text-green-600">+{metrics.xp} XP</span>
-                            <span className="px-2 py-0.5 rounded-full border text-[10px]">External</span>
+                            {item.isExternal ? (
+                              <span className="px-2 py-0.5 rounded-full border text-[10px] bg-muted/60 text-muted-foreground">External</span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full border text-[10px] bg-blue-500/20 text-blue-400 border-blue-500/50">Internal</span>
+                            )}
                           </div>
                           <div className="mt-1 inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border w-max"><CalendarDays size={12} />{item.date}</div>
                           <div className="mt-1 text-xs text-muted-foreground truncate">{item.organization}</div>
@@ -925,6 +1096,20 @@ const Jobs = () => {
               .sort((a, b) => {
                 if (sortBy === "xp") return b.m.xp - a.m.xp;
                 if (sortBy === "stars") return b.m.stars - a.m.stars;
+                if (sortBy === "slots") {
+                  const slotsA = a.it.spots ?? 0;
+                  const slotsB = b.it.spots ?? 0;
+                  return slotsB - slotsA; // More slots first
+                }
+                if (sortBy === "soonest") {
+                  // Sort by start date - soonest first
+                  // Find the opportunity in the original data to get start_dt
+                  const oppA = (opportunitiesQuery.data ?? []).find(o => o.id === a.it.opportunityId);
+                  const oppB = (opportunitiesQuery.data ?? []).find(o => o.id === b.it.opportunityId);
+                  const dateA = oppA?.start_dt ? new Date(oppA.start_dt).getTime() : Infinity;
+                  const dateB = oppB?.start_dt ? new Date(oppB.start_dt).getTime() : Infinity;
+                  return dateA - dateB; // Soonest first (earlier dates come first)
+                }
                 return 0;
               })
               .slice(0, limit)
@@ -935,6 +1120,7 @@ const Jobs = () => {
                   key={`${item.opportunityId}-${extRefresh}`}
                   {...item}
                   score={metrics.score}
+                  stars={metrics.stars}
                   xpReward={metrics.xp}
                   applied={hasApplied(item.opportunityId)}
                   onClick={() => {
@@ -949,8 +1135,10 @@ const Jobs = () => {
                       opportunityId: item.opportunityId,
                       applyUrl: item.externalUrl,
                       contactEmail: item.contactEmail,
+                      description: item.description,
+                      applicationForm: item.applicationForm,
                     });
-                    setSelectedMetrics({ stars: Math.max(0, Math.min(5, Math.round((metrics.score || 0) / 10))), xp: metrics.xp });
+                    setSelectedMetrics({ stars: Math.max(0, Math.min(5, metrics.stars || 0)), xp: metrics.xp });
                     setDetailsOpen2(true);
                   }}
                   onApply={async (opportunityId, title) => {
